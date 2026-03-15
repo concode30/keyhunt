@@ -47,6 +47,15 @@ VANITYKEYFOUND.txt
 *.x86_64
 *.hex
 
+# Test output files
+tests/*.bech32
+tests/*.eth
+tests/*.pub
+tests/*.rmd
+gpu/*.o
+gpu/*.out
+gpu/*.bin
+
 # Debug files
 *.dSYM/
 *.su
