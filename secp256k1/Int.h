@@ -195,36 +195,113 @@ private:
 
 // Inline routines
 
-#ifndef _WIN64
-
-// Missing intrinsics
+// Portable 64-bit multiply with 128-bit result
 static uint64_t inline _umul128(uint64_t a, uint64_t b, uint64_t *h) {
-  uint64_t rhi;
-  uint64_t rlo;
-  __asm__( "mulq  %[b];" :"=d"(rhi),"=a"(rlo) :"1"(a),[b]"rm"(b));
-    *h = rhi;
-    return rlo;
-}
-
-static uint64_t inline __shiftright128(uint64_t a, uint64_t b,unsigned char n) {
-  uint64_t c;
-  __asm__ ("movq %1,%0;shrdq %3,%2,%0;" : "=D"(c) : "r"(a),"r"(b),"c"(n));
-  return  c;
-}
-
-
-static uint64_t inline __shiftleft128(uint64_t a, uint64_t b,unsigned char n) {
-  uint64_t c;
-  __asm__ ("movq %1,%0;shldq %3,%2,%0;" : "=D"(c) : "r"(b),"r"(a),"c"(n));
-  return  c;
-}
-
-#define _subborrow_u64(a,b,c,d) __builtin_ia32_sbb_u64(a,b,c,(long long unsigned int*)d);
-#define _addcarry_u64(a,b,c,d) __builtin_ia32_addcarryx_u64(a,b,c,(long long unsigned int*)d);
-#define _byteswap_uint64 __builtin_bswap64
+#if defined(__SIZEOF_INT128__)
+  // Use __uint128_t when available (GCC/Clang on 64-bit platforms)
+  __uint128_t result = (__uint128_t)a * (__uint128_t)b;
+  *h = (uint64_t)(result >> 64);
+  return (uint64_t)result;
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64))
+  // MSVC intrinsics
+  unsigned __int64 high;
+  unsigned __int64 low = _umul128(a, b, &high);
+  *h = high;
+  return low;
 #else
-#include <intrin.h>
+  // Pure C fallback using 32-bit multiplies
+  uint64_t a_lo = (uint32_t)a;
+  uint64_t a_hi = a >> 32;
+  uint64_t b_lo = (uint32_t)b;
+  uint64_t b_hi = b >> 32;
+  
+  uint64_t p0 = a_lo * b_lo;
+  uint64_t p1 = a_lo * b_hi;
+  uint64_t p2 = a_hi * b_lo;
+  uint64_t p3 = a_hi * b_hi;
+  
+  uint64_t mid = (p0 >> 32) + (p1 & 0xFFFFFFFF) + (p2 & 0xFFFFFFFF);
+  *h = p3 + (mid >> 32) + (p1 >> 32) + (p2 >> 32);
+  return p0 + (mid << 32);
 #endif
+}
+
+// Portable 128-bit right shift
+static uint64_t inline __shiftright128(uint64_t a, uint64_t b, unsigned char n) {
+#if defined(__GNUC__) && !defined(__clang__)
+  // GCC builtin for 128-bit shift
+  if (n == 0) return a;
+  if (n >= 64) return (a << (64 - n)) | (b >> n);
+  return (a >> n) | (b << (64 - n));
+#else
+  // Portable implementation
+  if (n == 0) return a;
+  if (n >= 64) return (a << (64 - n)) | (b >> n);
+  return (a >> n) | (b << (64 - n));
+#endif
+}
+
+// Portable 128-bit left shift
+static uint64_t inline __shiftleft128(uint64_t a, uint64_t b, unsigned char n) {
+#if defined(__GNUC__) && !defined(__clang__)
+  // GCC builtin for 128-bit shift
+  if (n == 0) return b;
+  if (n >= 64) return (b >> (64 - n)) | (a << n);
+  return (b << n) | (a >> (64 - n));
+#else
+  // Portable implementation
+  if (n == 0) return b;
+  if (n >= 64) return (b >> (64 - n)) | (a << n);
+  return (b << n) | (a >> (64 - n));
+#endif
+}
+
+// Portable carry/borrow intrinsics
+static uint64_t inline _addcarry_u64(uint64_t c, uint64_t a, uint64_t b, uint64_t *r) {
+#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__)
+  // Use GCC builtin on x86-64
+  unsigned char carry = __builtin_ia32_addcarryx_u64(c, a, b, (unsigned long long *)r);
+  return carry;
+#else
+  // Portable implementation using unsigned arithmetic
+  unsigned __int128 sum = (unsigned __int128)a + (unsigned __int128)b + (unsigned __int128)c;
+  *r = (uint64_t)sum;
+  return (sum >> 64) & 1;
+#endif
+}
+
+static uint64_t inline _subborrow_u64(uint64_t c, uint64_t a, uint64_t b, uint64_t *r) {
+#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__)
+  // Use GCC builtin on x86-64
+  unsigned char borrow = __builtin_ia32_sbb_u64(c, a, b, (unsigned long long *)r);
+  return borrow;
+#else
+  // Portable implementation using unsigned arithmetic
+  unsigned __int128 diff = (unsigned __int128)a - (unsigned __int128)b - (unsigned __int128)c;
+  *r = (uint64_t)diff;
+  return ((diff >> 64) & 1) ^ 1;  // Borrow flag (inverted)
+#endif
+}
+
+// Portable byteswap
+static uint64_t inline _byteswap_uint64(uint64_t v) {
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_bswap64(v);
+#elif defined(_MSC_VER)
+  return _byteswap_uint64(v);
+#else
+  // Pure C fallback
+  v = (v & 0x00000000000000FFULL) << 56 |
+      (v & 0x000000000000FF00ULL) << 40 |
+      (v & 0x0000000000FF0000ULL) << 24 |
+      (v & 0x00000000FF000000ULL) << 8  |
+      (v & 0x000000FF00000000ULL) >> 8  |
+      (v & 0x0000FF0000000000ULL) >> 24 |
+      (v & 0x00FF000000000000ULL) >> 40 |
+      (v & 0xFF00000000000000ULL) >> 56;
+  return v;
+#endif
+}
 
 static void inline imm_mul(uint64_t *x, uint64_t y, uint64_t *dst) {
 
